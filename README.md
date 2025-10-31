@@ -196,6 +196,9 @@ make build
 # Run tests
 make test
 
+# Test GitHub Actions workflow locally
+./scripts/test-workflow.sh
+
 # Install
 make install
 ```

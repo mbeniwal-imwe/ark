@@ -1,0 +1,69 @@
+name: PR Tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+jobs:
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.base.ref == 'main'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: go.sum
+      
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@v41
+        with:
+          files: |
+            **/*.go
+            go.mod
+            go.sum
+      
+      - name: Download dependencies
+        run: go mod download
+      
+      - name: Run tests
+        run: |
+          echo "Running tests for changed files..."
+          go test -v -race -coverprofile=coverage.out ./cmd/...
+      
+      - name: Run all tests
+        run: go test -v ./...
+      
+      - name: Generate test coverage
+        run: |
+          go tool cover -func=coverage.out
+          go tool cover -html=coverage.out -o coverage.html || true
+      
+      - name: Check test coverage
+        run: |
+          coverage=$(go tool cover -func=coverage.out | grep total | awk '{print $3}')
+          echo "Test Coverage: $coverage"
+          echo "::notice::Test Coverage: $coverage"
+      
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report-pr-${{ github.event.pull_request.number }}
+          path: coverage.html
+          retention-days: 7
+      
+      - name: Build and verify
+        run: |
+          mkdir -p build
+          go build -o build/ark .
+          ./build/ark version || true
+

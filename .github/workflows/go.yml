@@ -1,0 +1,165 @@
+name: Go CI
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  GO_VERSION: '1.23'
+
+jobs:
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        go-version: ['1.23']
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache-dependency-path: go.sum
+      
+      - name: Get git commit hash
+        id: git
+        run: |
+          echo "hash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+        continue-on-error: true
+      
+      - name: Download dependencies
+        run: go mod download
+      
+      - name: Verify dependencies
+        run: go mod verify
+      
+      - name: Run tests
+        run: go test -v -race -coverprofile=coverage-${{ matrix.os }}.out ./cmd/...
+      
+      - name: Run all tests
+        run: go test -v ./...
+      
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        if: matrix.os == 'ubuntu-latest'
+        with:
+          file: ./coverage-ubuntu-latest.out
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+      
+      - name: Generate coverage report
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          go tool cover -func=coverage-${{ matrix.os }}.out | tail -1
+          go tool cover -html=coverage-${{ matrix.os }}.out -o coverage.html || true
+      
+      - name: Upload coverage HTML
+        uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-latest'
+        with:
+          name: coverage-report
+          path: coverage.html
+          retention-days: 30
+      
+      - name: Build
+        run: |
+          mkdir -p build
+          GIT_COMMIT="${{ steps.git.outputs.hash }}"
+          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          go build -ldflags "-X github.com/mbeniwal-imwe/ark/cmd.Version=dev -X github.com/mbeniwal-imwe/ark/cmd.BuildDate=$BUILD_DATE -X github.com/mbeniwal-imwe/ark/cmd.GitCommit=$GIT_COMMIT" -o build/ark-${{ matrix.os }} .
+      
+      - name: Test binary
+        run: |
+          ./build/ark-${{ matrix.os }} version || true
+
+  lint:
+    name: Lint and Format Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      
+      - name: Run gofmt
+        run: |
+          echo "Checking code formatting..."
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "The following files are not formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+          echo "✓ All files are properly formatted"
+      
+      - name: Run go vet
+        run: |
+          echo "Running go vet..."
+          go vet ./...
+          echo "✓ go vet passed"
+      
+      - name: Run staticcheck (if available)
+        continue-on-error: true
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest || true
+          staticcheck ./... || true
+
+  build-check:
+    name: Build Check
+    runs-on: ${{ matrix.os }}
+    needs: [test]
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: go.sum
+      
+      - name: Get git commit hash
+        id: git
+        run: |
+          echo "hash=$(git rev-parse --short HEAD || echo 'unknown')" >> $GITHUB_OUTPUT
+        continue-on-error: true
+      
+      - name: Build binary
+        run: |
+          mkdir -p build
+          GIT_COMMIT="${{ steps.git.outputs.hash }}"
+          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          EXT=""
+          if [ "${{ matrix.os }}" == "windows-latest" ]; then
+            EXT=".exe"
+          fi
+          go build -ldflags "-X github.com/mbeniwal-imwe/ark/cmd.Version=dev -X github.com/mbeniwal-imwe/ark/cmd.BuildDate=$BUILD_DATE -X github.com/mbeniwal-imwe/ark/cmd.GitCommit=$GIT_COMMIT" -o build/ark$EXT .
+      
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ark-${{ matrix.os }}
+          path: build/ark*
+          retention-days: 7
+

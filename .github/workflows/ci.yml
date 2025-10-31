@@ -1,0 +1,183 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache-dependency-path: go.sum
+      
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+      
+      - name: Get git commit hash
+        id: git
+        run: |
+          echo "hash=$(git rev-parse --short HEAD || echo 'unknown')" >> $GITHUB_OUTPUT
+      
+      - name: Download dependencies
+        run: go mod download
+      
+      - name: Verify dependencies
+        run: go mod verify
+      
+      - name: Run unit tests
+        run: |
+          echo "Running unit tests for cmd package..."
+          go test -v -race -coverprofile=coverage.out ./cmd/...
+      
+      - name: Run all tests
+        run: |
+          echo "Running all tests..."
+          go test -v ./...
+      
+      - name: Generate coverage report
+        run: |
+          echo "## Test Coverage Summary" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          go tool cover -func=coverage.out >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          
+          echo "## Coverage Summary"
+          go tool cover -func=coverage.out | tail -1
+          
+          # Generate HTML coverage report
+          go tool cover -html=coverage.out -o coverage.html || true
+      
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: |
+            coverage.out
+            coverage.html
+          retention-days: 30
+      
+      - name: Build binary
+        run: |
+          mkdir -p build
+          GIT_COMMIT="${{ steps.git.outputs.hash }}"
+          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          go build -ldflags "-X github.com/mbeniwal-imwe/ark/cmd.Version=dev -X github.com/mbeniwal-imwe/ark/cmd.BuildDate=$BUILD_DATE -X github.com/mbeniwal-imwe/ark/cmd.GitCommit=$GIT_COMMIT" -o build/ark .
+      
+      - name: Verify binary
+        run: |
+          ./build/ark version
+          ./build/ark --help || true
+
+  lint:
+    name: Lint and Format Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+      
+      - name: Run gofmt check
+        run: |
+          echo "Checking code formatting with gofmt..."
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "❌ The following files are not properly formatted:"
+            echo "$unformatted"
+            echo ""
+            echo "Please run: gofmt -w ."
+            exit 1
+          fi
+          echo "✅ All files are properly formatted"
+      
+      - name: Run go vet
+        run: |
+          echo "Running go vet..."
+          go vet ./...
+          echo "✅ go vet passed"
+      
+      - name: Run go mod tidy check
+        run: |
+          go mod tidy
+          if ! git diff --quiet go.mod go.sum; then
+            echo "❌ go.mod or go.sum needs to be updated"
+            echo "Please run: go mod tidy"
+            git diff go.mod go.sum
+            exit 1
+          fi
+          echo "✅ go.mod and go.sum are up to date"
+
+  build:
+    name: Build Verification
+    runs-on: ${{ matrix.os }}
+    needs: [test, lint]
+    
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        go-version: ['1.23']
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache-dependency-path: go.sum
+      
+      - name: Get git commit hash
+        id: git
+        run: |
+          echo "hash=$(git rev-parse --short HEAD || echo 'unknown')" >> $GITHUB_OUTPUT
+      
+      - name: Download dependencies
+        run: go mod download
+      
+      - name: Build binary
+        run: |
+          mkdir -p build
+          GIT_COMMIT="${{ steps.git.outputs.hash }}"
+          BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          go build -ldflags "-X github.com/mbeniwal-imwe/ark/cmd.Version=dev -X github.com/mbeniwal-imwe/ark/cmd.BuildDate=$BUILD_DATE -X github.com/mbeniwal-imwe/ark/cmd.GitCommit=$GIT_COMMIT" -o build/ark .
+      
+      - name: Test binary
+        run: |
+          ./build/ark version
+          ./build/ark --help || true
+      
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
+        with:
+          name: ark-${{ matrix.os }}
+          path: build/ark
+          retention-days: 7
